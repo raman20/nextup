@@ -3,8 +3,8 @@
  * Swap BROKERS if a public endpoint is down.
  */
 export const BROKERS = [
-  "wss://broker.emqx.io:8084/mqtt",
   "wss://broker.hivemq.com:8884/mqtt",
+  "wss://broker.emqx.io:8084/mqtt",
   "wss://test.mosquitto.org:8081",
 ];
 
@@ -256,11 +256,12 @@ export async function connectRoom({ code, memberId, isHost, onMessage, onStatus 
       ws = await openSocket(url);
       rest = new Uint8Array(0);
       connected = false;
+      let live = false;
       ws.onmessage = onFrame;
       ws.onclose = () => {
         if (pingTimer) clearInterval(pingTimer);
         pingTimer = null;
-        if (!closed) onStatus("disconnected");
+        if (!closed && live) onStatus("disconnected");
       };
       send(connectPacket(clientId, will));
       const ok = await new Promise((resolve) => {
@@ -281,6 +282,7 @@ export async function connectRoom({ code, memberId, isHost, onMessage, onStatus 
         lastError = new Error("no connack from " + url);
         continue;
       }
+      live = true;
       pingTimer = setInterval(() => send(pingPacket()), (KEEP_ALIVE * 1000) / 2);
       onStatus("connected");
       return {

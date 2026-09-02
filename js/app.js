@@ -74,6 +74,7 @@ let room = null;
 let isHost = false;
 let started = false;
 let player = null;
+let playerBoot = null;
 let lastLoaded = null;
 let lastHostBeat = 0;
 let hostWatch = null;
@@ -83,6 +84,7 @@ let wakeLock = null;
 let toastTimer = 0;
 let ignoreEndedUntil = 0;
 let statusText = "";
+let actuallyPlaying = false;
 let leaving = false;
 let reconnectTimer = 0;
 
@@ -181,7 +183,9 @@ function render() {
   ui.playerWrap.classList.toggle("on", isHost);
   ui.btnLock.textContent = room.locked ? "🔒" : "🔓";
   ui.btnPause.textContent = room.paused ? "Resume" : "Pause";
-  ui.startOverlay.classList.toggle("gone", started && !!room.nowPlaying);
+  const startBtn = $("btn-start");
+  if (startBtn) startBtn.textContent = started ? "Tap to play" : "Start the party";
+  ui.startOverlay.classList.toggle("gone", actuallyPlaying && !room.paused);
 
   const np = room.nowPlaying;
   if (np) {
@@ -413,41 +417,77 @@ function onBus(tail, obj) {
 }
 
 async function ensurePlayer() {
-  if (!isHost || player) return;
-  await loadIframeApi();
-  player = createHostPlayer("yt-player", {
+  if (!isHost) return;
+  if (player) return;
+  if (playerBoot) return playerBoot;
+  playerBoot = (async () => {
+    await loadIframeApi();
+    if (player) return;
+    player = createHostPlayer("yt-player", {
+    onReady() {
+      syncPlayer();
+    },
     onEnded() {
       if (Date.now() < ignoreEndedUntil) return;
       ignoreEndedUntil = Date.now() + 1200;
+      actuallyPlaying = false;
       send({ type: "ended" });
     },
     onError() {
-      toast("Video can’t play here — skipping");
+      toast("This video can’t play in the embed — skipping");
       ignoreEndedUntil = Date.now() + 1200;
+      actuallyPlaying = false;
       send({ type: "error" });
     },
     onPlaying(data) {
+      actuallyPlaying = true;
+      ui.startOverlay.classList.add("gone");
       if (data && data.title && room && room.nowPlaying && room.nowPlaying.videoId === data.video_id) {
         if (room.nowPlaying.title === "YouTube video") {
           send({ type: "retitle", videoId: data.video_id, title: data.title, channelTitle: data.author });
         }
       }
+      render();
     },
-  });
+    onPaused() {
+      actuallyPlaying = false;
+      render();
+    },
+    });
+  })();
+  return playerBoot;
+}
+
+function upcomingTrack() {
+  if (!room) return null;
+  return room.nowPlaying || room.queue[0] || null;
 }
 
 function syncPlayer() {
   if (!isHost || !player || !room) return;
-  const np = room.nowPlaying;
+  const np = upcomingTrack();
   if (!np) return;
+  const shouldPlay = started && !!room.nowPlaying && !room.paused;
   if (np.videoId !== lastLoaded) {
     lastLoaded = np.videoId;
     ignoreEndedUntil = Date.now() + 1500;
-    player.load(np.videoId, started);
-  } else if (started) {
-    if (room.paused) player.pause();
-    else player.play();
+    player.load(np.videoId, shouldPlay);
+  } else if (shouldPlay) {
+    player.play();
+  } else if (room.paused) {
+    player.pause();
   }
+}
+
+function kickPlay() {
+  started = true;
+  if (!room) return;
+  if (!room.nowPlaying && room.queue.length) send({ type: "start" });
+  else if (room.nowPlaying && room.paused) send({ type: "pause", paused: false });
+  else if (room.nowPlaying) syncPlayer();
+  else send({ type: "start" });
+  if (player) player.play();
+  requestWake();
 }
 
 function scheduleReconnect(code) {
@@ -469,6 +509,7 @@ async function enterRoom(code, asHost, reconnect = false) {
   isHost = asHost;
   if (!reconnect) {
     started = false;
+    actuallyPlaying = false;
     lastLoaded = null;
     lastHostBeat = Date.now();
     if (asHost && !room) room = createRoom(code, memberId, nickname());
@@ -478,6 +519,7 @@ async function enterRoom(code, asHost, reconnect = false) {
   location.hash = "#/r/" + code;
   statusText = "connecting";
   render();
+  if (asHost) ensurePlayer();
   if (bus) {
     bus.close();
     bus = null;
@@ -536,11 +578,13 @@ function leave() {
     player.destroy();
     player = null;
   }
+  playerBoot = null;
   remountPlayer();
   dropWake();
   room = null;
   isHost = false;
   started = false;
+  actuallyPlaying = false;
   showHome();
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 }
@@ -588,12 +632,8 @@ ui.joinCode.addEventListener("keydown", (e) => {
 
 $("btn-leave").onclick = leave;
 
-$("btn-start").onclick = async () => {
-  started = true;
-  ui.startOverlay.classList.add("gone");
-  send({ type: "start" });
-  await requestWake();
-  syncPlayer();
+$("btn-start").onclick = () => {
+  kickPlay();
 };
 
 $("btn-skip").onclick = () => send({ type: "skip" });

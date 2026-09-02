@@ -96,61 +96,102 @@ export function createHostPlayer(elementId, handlers) {
   let player = null;
   let ready = false;
   let wantId = null;
+  let wantPlay = false;
 
-  function fireEnded() {
-    if (handlers.onEnded) handlers.onEnded();
+  function armIframe() {
+    try {
+      const iframe = player && player.getIframe && player.getIframe();
+      if (!iframe) return;
+      iframe.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture; fullscreen");
+      iframe.setAttribute("allowfullscreen", "true");
+      iframe.setAttribute("playsinline", "true");
+    } catch {}
+  }
+
+  function applyWanted() {
+    if (!ready || !player || !wantId) return;
+    const id = wantId;
+    const play = wantPlay;
+    wantId = null;
+    wantPlay = false;
+    if (play) {
+      player.loadVideoById(id);
+      try {
+        player.unMute();
+        player.playVideo();
+      } catch {}
+    } else {
+      player.cueVideoById(id);
+    }
   }
 
   const ytPlayer = new window.YT.Player(elementId, {
     width: "640",
     height: "360",
+    host: "https://www.youtube.com",
     playerVars: {
       rel: 0,
       playsinline: 1,
       origin: location.origin,
-      modestbranding: 0,
+      enablejsapi: 1,
+      autoplay: 0,
+      mute: 0,
+      controls: 1,
+      fs: 1,
     },
     events: {
       onReady() {
         ready = true;
         player = ytPlayer;
+        armIframe();
         if (handlers.onReady) handlers.onReady();
-        if (wantId) {
-          player.loadVideoById(wantId);
-          wantId = null;
-        }
+        applyWanted();
       },
       onStateChange(e) {
-        if (e.data === window.YT.PlayerState.ENDED) fireEnded();
-        if (e.data === window.YT.PlayerState.PLAYING && handlers.onPlaying) {
+        const YT = window.YT;
+        if (e.data === YT.PlayerState.ENDED) {
+          if (handlers.onEnded) handlers.onEnded();
+        }
+        if (e.data === YT.PlayerState.PLAYING && handlers.onPlaying) {
           let data = {};
           try {
             data = player.getVideoData() || {};
           } catch {}
           handlers.onPlaying(data);
         }
+        if (e.data === YT.PlayerState.PAUSED && handlers.onPaused) handlers.onPaused();
       },
       onError(e) {
-        const code = e.data;
-        if (handlers.onError) handlers.onError(code);
+        if (handlers.onError) handlers.onError(e.data);
       },
     },
   });
 
   return {
+    ready() {
+      return ready;
+    },
     load(videoId, autoplay) {
-      if (!ready) {
-        wantId = videoId;
-        return;
-      }
-      if (autoplay) player.loadVideoById(videoId);
-      else player.cueVideoById(videoId);
+      wantId = videoId;
+      wantPlay = !!autoplay;
+      applyWanted();
     },
     play() {
-      if (player) player.playVideo();
+      if (!player) return;
+      try {
+        player.unMute();
+        player.playVideo();
+      } catch {}
     },
     pause() {
       if (player) player.pauseVideo();
+    },
+    state() {
+      try {
+        return player ? player.getPlayerState() : null;
+      } catch {
+        return null;
+      }
     },
     getData() {
       try {

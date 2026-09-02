@@ -39,7 +39,7 @@ The host phone must keep the tab in the foreground. iOS will stop playback if yo
 
 ## Swap the message bus
 
-Public brokers have no SLA. Edit `BROKERS` at the top of `js/net.js`.
+Public brokers have no SLA. NextUp tries EMQX, then HiveMQ, then Mosquitto. Edit `BROKERS` at the top of `js/net.js` to point at your own.
 
 ## Tests
 

@@ -3,6 +3,7 @@
  * Swap BROKERS if a public endpoint is down.
  */
 export const BROKERS = [
+  "wss://broker.emqx.io:8084/mqtt",
   "wss://broker.hivemq.com:8884/mqtt",
   "wss://test.mosquitto.org:8081",
 ];
@@ -126,12 +127,12 @@ function parsePublish(typeFlags, payload) {
   return { topic, data: dec.decode(payload.subarray(o)) };
 }
 
-function openSocket(url) {
+function openOnce(url, protocols) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let ws;
     try {
-      ws = new WebSocket(url, ["mqtt"]);
+      ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     } catch (e) {
       reject(e);
       return;
@@ -144,7 +145,7 @@ function openSocket(url) {
         ws.close();
       } catch {}
       reject(new Error("timeout"));
-    }, 8000);
+    }, 5000);
     ws.onopen = () => {
       if (settled) return;
       settled = true;
@@ -155,9 +156,25 @@ function openSocket(url) {
       if (settled) return;
       settled = true;
       clearTimeout(t);
+      try {
+        ws.close();
+      } catch {}
       reject(new Error("socket error"));
     };
   });
+}
+
+async function openSocket(url) {
+  const tries = [["mqtt"], undefined];
+  let last = new Error("socket error");
+  for (const proto of tries) {
+    try {
+      return await openOnce(url, proto);
+    } catch (e) {
+      last = e;
+    }
+  }
+  throw last;
 }
 
 /**

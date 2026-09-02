@@ -83,6 +83,8 @@ let wakeLock = null;
 let toastTimer = 0;
 let ignoreEndedUntil = 0;
 let statusText = "";
+let leaving = false;
+let reconnectTimer = 0;
 
 function nickname() {
   return (ui.nick.value || localStorage.getItem(LS_NICK) || "Guest").trim().slice(0, 20) || "Guest";
@@ -207,8 +209,12 @@ function render() {
   }
 
   const gone = !isHost && Date.now() - lastHostBeat > HOST_GONE_MS && lastHostBeat > 0;
-  if (statusText) setBanner(statusText, statusText !== "connected" && statusText !== "live");
-  else if (gone) setBanner("Host left — playback pauses until they reopen this room.", true);
+  const st = statusText || "";
+  if (st === "connecting" || st === "connecting…") setBanner("Connecting phones…", false);
+  else if (st === "reconnecting" || st === "disconnected") setBanner("Connection dropped — retrying…", true);
+  else if (st.startsWith("Could") || st.startsWith("bus error") || st.startsWith("no connack") || st.startsWith("socket")) {
+    setBanner("Could not reach the room bus. Retrying…", true);
+  } else if (gone) setBanner("Host left — they need to reopen the room on their phone.", true);
   else if (isHost && document.visibilityState === "hidden") setBanner("This tab is in the background. iPhone will stop YouTube.", true);
   else if (isHost) setBanner("Keep this tab open. This phone is the speaker.", false);
   else setBanner("", false);
@@ -364,6 +370,13 @@ async function hostSearchFor(obj) {
   bus.publish("search/" + obj.requestId, payload);
 }
 
+function announce() {
+  if (!bus) return;
+  const payload = { memberId, name: nickname(), role: isHost ? "host" : "guest", online: true };
+  bus.publish("hello", payload, true);
+  bus.publish("presence/" + memberId, payload, true);
+}
+
 function onBus(tail, obj) {
   if (!obj) return;
   if (tail === "state" && obj.room && obj.from === obj.room.hostId) {
@@ -378,18 +391,16 @@ function onBus(tail, obj) {
     render();
     return;
   }
+  if (tail === "hello" || tail === "bye" || tail.startsWith("presence/")) {
+    if (isHost && obj.memberId && obj.memberId !== memberId) {
+      localApply(obj.memberId, { type: obj.online === false || tail === "bye" ? "bye" : "hello", name: obj.name });
+    }
+    return;
+  }
   if (!isHost) {
     if (tail.startsWith("search/") && obj.requestId === pendingSearch) {
       showResults(obj.items, obj.error);
     }
-    return;
-  }
-  if (tail === "hello" && obj.memberId) {
-    localApply(obj.memberId, { type: "hello", name: obj.name });
-    return;
-  }
-  if (tail === "bye" && obj.memberId) {
-    localApply(obj.memberId, { type: "bye" });
     return;
   }
   if (tail === "action" && obj.from && obj.from !== memberId) {
@@ -439,21 +450,33 @@ function syncPlayer() {
   }
 }
 
-async function enterRoom(code, asHost) {
+function scheduleReconnect(code) {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    if (leaving || !room) return;
+    enterRoom(code, isHost, true);
+  }, 1500);
+}
+
+async function enterRoom(code, asHost, reconnect = false) {
   code = normalizeCode(code);
   if (!isValidCode(code)) {
     toast("Bad room code");
     return;
   }
+  leaving = false;
   localStorage.setItem(LS_NICK, nickname());
   isHost = asHost;
-  started = false;
-  lastLoaded = null;
-  lastHostBeat = Date.now();
-  statusText = "connecting…";
-  if (asHost && !room) room = createRoom(code, memberId, nickname());
-  if (!asHost) room = createRoom(code, "unknown", "Host");
-  showRoom();
+  if (!reconnect) {
+    started = false;
+    lastLoaded = null;
+    lastHostBeat = Date.now();
+    if (asHost && !room) room = createRoom(code, memberId, nickname());
+    if (!asHost) room = createRoom(code, "unknown", "Host");
+    showRoom();
+  }
+  location.hash = "#/r/" + code;
+  statusText = "connecting";
   render();
   if (bus) {
     bus.close();
@@ -466,32 +489,43 @@ async function enterRoom(code, asHost) {
       isHost,
       onMessage: onBus,
       onStatus(s) {
-        statusText = s;
+        if (s === "disconnected" && !leaving) {
+          statusText = "reconnecting";
+          render();
+          scheduleReconnect(code);
+          return;
+        }
+        statusText = s === "connected" ? "live" : s;
         render();
       },
     });
-    bus.publish("hello", { memberId, name: nickname(), role: isHost ? "host" : "guest" });
+    announce();
     if (isHost) {
       publishState();
       await ensurePlayer();
       if (!hostWatch) {
         hostWatch = setInterval(() => {
-          if (isHost && bus) bus.publish("host", { memberId, online: true, ts: Date.now() }, true);
+          if (isHost && bus) {
+            bus.publish("host", { memberId, online: true, ts: Date.now() }, true);
+            announce();
+          }
           render();
         }, 10000);
       }
     }
-    location.hash = "#/r/" + code;
     statusText = "live";
     render();
   } catch (e) {
-    statusText = "";
-    setBanner("Could not reach the message bus. Try again in a moment.", true);
+    statusText = "reconnecting";
+    render();
     toast(e.message || "connect failed");
+    scheduleReconnect(code);
   }
 }
 
 function leave() {
+  leaving = true;
+  clearTimeout(reconnectTimer);
   if (hostWatch) {
     clearInterval(hostWatch);
     hostWatch = null;

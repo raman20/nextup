@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="referrer" content="origin" />
+  <title>NextUp — shared YouTube queue</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <section id="view-home" class="view home on">
+      <div class="mark">
+        <b>NEXTUP</b>
+        <h1>One phone.<br>Everyone queues.</h1>
+        <p>Host plays YouTube. Friends search, paste links, and vote on what is next — from any network.</p>
+      </div>
+      <div class="panel">
+        <h2>Your name</h2>
+        <input id="nick" type="text" maxlength="20" placeholder="e.g. Raman" autocomplete="nickname" />
+      </div>
+      <div class="panel">
+        <h2>Host a room</h2>
+        <p class="hint">This phone is the speaker. Keep the tab open.</p>
+        <button class="btn" id="btn-create">Create room</button>
+      </div>
+      <div class="panel">
+        <h2>Join a room</h2>
+        <input id="join-code" type="text" maxlength="8" placeholder="Room code" autocapitalize="characters" autocomplete="off" />
+        <button class="btn ghost" id="btn-join">Join</button>
+      </div>
+      <p class="foot">
+        Uses a public message bus only to sync the queue. Playback is the official
+        <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube</a> player on the host device.
+      </p>
+    </section>
+
+    <section id="view-room" class="view">
+      <header class="top">
+        <button class="icon-btn" id="btn-leave" title="Leave">←</button>
+        <div>
+          <div class="kicker">ROOM</div>
+          <div class="code" id="room-code">------</div>
+        </div>
+        <div class="grow"></div>
+        <button class="icon-btn" id="btn-qr" title="QR">QR</button>
+        <button class="icon-btn host-only" id="btn-lock" title="Lock queue" hidden>#</button>
+        <button class="icon-btn host-only" id="btn-gear" title="Settings" hidden>⚙</button>
+      </header>
+
+      <div id="banner" class="banner"></div>
+
+      <div id="player-wrap" class="player-wrap">
+        <div class="stage">
+          <div id="yt-player"></div>
+          <div id="start-overlay" class="start-overlay">
+            <button class="btn" id="btn-start">Start the party</button>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn ghost" id="btn-pause">Pause</button>
+          <button class="btn" id="btn-skip">Skip</button>
+        </div>
+      </div>
+
+      <div class="now" id="now">
+        <img id="now-img" alt="" />
+        <div class="meta">
+          <div class="kicker" id="now-kicker">NOTHING PLAYING</div>
+          <div class="title" id="now-title">Queue a song to begin</div>
+          <div class="sub" id="now-sub"></div>
+        </div>
+      </div>
+
+      <div class="queue" id="queue"></div>
+
+      <div class="search-dock">
+        <div class="search-box">
+          <div class="results" id="results" hidden></div>
+          <input id="search" type="search" placeholder="Search YouTube or paste a link" />
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <div id="modal-qr" class="modal">
+    <div class="sheet">
+      <div class="kicker">SCAN TO JOIN</div>
+      <div class="bigcode" id="qr-code-label"></div>
+      <canvas id="qr-canvas" width="260" height="260"></canvas>
+      <p class="hint" id="qr-url"></p>
+      <button class="btn" id="btn-copy">Copy link</button>
+      <button class="btn ghost" id="btn-close-qr">Close</button>
+    </div>
+  </div>
+
+  <div id="modal-gear" class="modal">
+    <div class="sheet" style="align-items:stretch">
+      <h2>Host settings</h2>
+      <p class="hint">Optional YouTube Data API key, stored only on this phone. Restrict it to this site’s HTTP referer in Google Cloud. Paste-a-link works without a key.</p>
+      <label>API key</label>
+      <input id="yt-key" type="password" placeholder="AIza…" autocomplete="off" />
+      <button class="btn" id="btn-save-key">Save key</button>
+      <button class="btn ghost" id="btn-close-gear">Close</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

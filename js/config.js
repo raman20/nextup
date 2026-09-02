@@ -4,7 +4,8 @@
  * (e.g. https://raman20.github.io and http://localhost:8080).
  * Override locally with localStorage nextup.googleClientId.
  */
-export const GOOGLE_CLIENT_ID = "";
+export const GOOGLE_CLIENT_ID =
+  "179150607467-5j3tla3sfnhj6at4ifndptq4v0kiemko.apps.googleusercontent.com";
 
 export function clientId() {
   return (localStorage.getItem("nextup.googleClientId") || GOOGLE_CLIENT_ID || "").trim();

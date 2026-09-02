@@ -1,17 +1,22 @@
+import { parseVideoId, thumbnailUrl } from "./room.js";
+import { clientId } from "./config.js";
+import { getToken, initGoogle, signIn, signedIn } from "./google-auth.js";
 import {
-  applyAction,
-  createRoom,
-  formatDuration,
-  generateCode,
-  generateId,
-  HOST_GONE_MS,
-  isValidCode,
-  normalizeCode,
-  parseVideoId,
-  thumbnailUrl,
-} from "./room.js";
-import { connectRoom } from "./net.js";
-import { createHostPlayer, loadIframeApi, lookupOEmbed, searchYoutube } from "./youtube.js";
+  bumpDown,
+  bumpUp,
+  createPlaylist,
+  deleteItem,
+  getPlaylist,
+  insertVideo,
+  listItems,
+  myChannelId,
+  parsePlaylistId,
+  playlistWatchUrl,
+  searchVideos,
+  shortCode,
+  videoMeta,
+} from "./yt-playlist.js";
+import { createHostPlayer, loadIframeApi, lookupOEmbed } from "./youtube.js";
 import { drawQr } from "./qr.js";
 
 const $ = (id) => document.getElementById(id);
@@ -42,61 +47,61 @@ const ui = {
   qrLabel: $("qr-code-label"),
   qrUrl: $("qr-url"),
   ytKey: $("yt-key"),
+  authStatus: $("auth-status"),
+  clientIdInput: $("google-client-id"),
 };
 
-const LS_ID = "nextup.memberId";
+const LS_OWNED = "nextup.ownedPlaylists";
 const LS_NICK = "nextup.nickname";
-const LS_KEY = "nextup.ytKey";
-const LS_HOSTS = "nextup.hostCodes";
+const LS_CID = "nextup.googleClientId";
 
-function loadHosts() {
+function ownedIds() {
   try {
-    return JSON.parse(localStorage.getItem(LS_HOSTS) || "[]");
+    return JSON.parse(localStorage.getItem(LS_OWNED) || "[]");
   } catch {
     return [];
   }
 }
-function saveHosts(arr) {
-  localStorage.setItem(LS_HOSTS, JSON.stringify(arr));
+function rememberOwned(id) {
+  const a = ownedIds();
+  if (!a.includes(id)) {
+    a.push(id);
+    localStorage.setItem(LS_OWNED, JSON.stringify(a));
+  }
 }
 
-const memberId = localStorage.getItem(LS_ID) || (() => {
-  const id = generateId();
-  localStorage.setItem(LS_ID, id);
-  return id;
-})();
-
 ui.nick.value = localStorage.getItem(LS_NICK) || "";
-ui.ytKey.value = localStorage.getItem(LS_KEY) || "";
+if (ui.clientIdInput) ui.clientIdInput.value = localStorage.getItem(LS_CID) || "";
 
-let bus = null;
-let room = null;
+let playlistId = null;
+let playlistOwner = null;
+let myChannel = null;
+let items = [];
 let isHost = false;
+let canWrite = false;
 let started = false;
+let paused = false;
 let player = null;
 let playerBoot = null;
 let lastLoaded = null;
-let lastHostBeat = 0;
-let hostWatch = null;
-let pendingSearch = null;
 let searchTimer = 0;
 let wakeLock = null;
 let toastTimer = 0;
 let ignoreEndedUntil = 0;
-let statusText = "";
 let actuallyPlaying = false;
 let leaving = false;
-let reconnectTimer = 0;
+let pollTimer = 0;
+let etag = null;
+let lastError = "";
 
 function nickname() {
-  return (ui.nick.value || localStorage.getItem(LS_NICK) || "Guest").trim().slice(0, 20) || "Guest";
+  return (ui.nick.value || localStorage.getItem(LS_NICK) || "").trim().slice(0, 20);
 }
 
 function showHome() {
   ui.viewHome.classList.add("on");
   ui.viewRoom.classList.remove("on");
 }
-
 function showRoom() {
   ui.viewHome.classList.remove("on");
   ui.viewRoom.classList.add("on");
@@ -106,7 +111,7 @@ function toast(msg) {
   ui.toast.textContent = msg;
   ui.toast.classList.add("on");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => ui.toast.classList.remove("on"), 2600);
+  toastTimer = setTimeout(() => ui.toast.classList.remove("on"), 2800);
 }
 
 function setBanner(text, bad) {
@@ -115,14 +120,43 @@ function setBanner(text, bad) {
   ui.banner.classList.toggle("bad", !!bad);
 }
 
-function joinUrl(code) {
-  return `${location.origin}${location.pathname}#/r/${code}`;
+function joinUrl() {
+  return `${location.origin}${location.pathname}#/p/${playlistId}`;
 }
 
-function publishState() {
-  if (!bus || !isHost || !room) return;
-  bus.publish("state", { from: memberId, room }, true);
-  bus.publish("host", { memberId, online: true, ts: Date.now() }, true);
+function tokenOrThrow() {
+  const t = getToken();
+  if (!t) {
+    signIn();
+    throw new Error("Sign in with Google first");
+  }
+  return t;
+}
+
+function toastAuth() {
+  if (ui.authStatus) {
+    ui.authStatus.textContent = signedIn() ? "Signed in with Google" : "Not signed in";
+  }
+}
+
+function renderHomeAuth() {
+  toastAuth();
+  const need = !clientId();
+  const setup = $("setup-panel");
+  if (setup) setup.hidden = !need;
+}
+
+async function requestWake() {
+  try {
+    if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen");
+  } catch {}
+}
+
+function nowItem() {
+  return items[0] || null;
+}
+function upNext() {
+  return items.slice(1);
 }
 
 function remountPlayer() {
@@ -135,113 +169,63 @@ function remountPlayer() {
   stage.insertBefore(d, overlay);
 }
 
-function localApply(from, action) {
-  const res = applyAction(room, from, action);
-  if (res.error) {
-    toast(res.error);
-    return false;
-  }
-  room = res.room;
-  if (isHost && started && !room.nowPlaying && room.queue.length && action.type === "add") {
-    room = applyAction(room, memberId, { type: "start" }).room;
-  }
-  lastHostBeat = Date.now();
-  render();
-  if (isHost) {
-    publishState();
-    syncPlayer();
-  }
-  return true;
-}
-
-function send(action) {
-  if (!room) return;
-  if (isHost) localApply(memberId, action);
-  else if (bus) bus.publish("action", { ...action, from: memberId });
-}
-
-async function requestWake() {
-  try {
-    if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen");
-  } catch {}
-}
-
-function dropWake() {
-  try {
-    if (wakeLock) wakeLock.release();
-  } catch {}
-  wakeLock = null;
-}
-
 function render() {
-  if (!room) return;
-  ui.roomCode.textContent = room.code;
+  if (!playlistId) return;
+  ui.roomCode.textContent = shortCode(playlistId);
   const hostBits = document.querySelectorAll(".host-only");
   hostBits.forEach((el) => {
     el.hidden = !isHost;
   });
+  if (ui.btnLock) ui.btnLock.hidden = true;
   ui.playerWrap.classList.toggle("on", isHost);
-  ui.btnLock.textContent = room.locked ? "🔒" : "🔓";
-  ui.btnPause.textContent = room.paused ? "Resume" : "Pause";
+  if (ui.btnPause) ui.btnPause.textContent = paused ? "Resume" : "Pause";
   const startBtn = $("btn-start");
   if (startBtn) startBtn.textContent = started ? "Tap to play" : "Start the party";
-  ui.startOverlay.classList.toggle("gone", actuallyPlaying && !room.paused);
+  ui.startOverlay.classList.toggle("gone", actuallyPlaying && !paused);
 
-  const np = room.nowPlaying;
+  const np = nowItem();
   if (np) {
     ui.nowImg.src = np.thumbnail || thumbnailUrl(np.videoId);
-    ui.nowKicker.textContent = room.paused ? "PAUSED" : "NOW PLAYING";
+    ui.nowKicker.textContent = !started ? "UP NEXT" : paused ? "PAUSED" : actuallyPlaying ? "NOW PLAYING" : "READY";
     ui.nowTitle.textContent = np.title;
-    const who = np.addedBy && np.addedBy.name ? np.addedBy.name : "someone";
-    const dur = formatDuration(np.durationSec);
-    ui.nowSub.textContent = [who, np.channelTitle, dur].filter(Boolean).join(" · ");
+    ui.nowSub.textContent = [np.channelTitle, np.addedBy].filter(Boolean).join(" · ");
   } else {
     ui.nowImg.removeAttribute("src");
     ui.nowKicker.textContent = "NOTHING PLAYING";
-    ui.nowTitle.textContent = room.queue.length ? "Host: tap Start the party" : "Queue a song to begin";
-    ui.nowSub.textContent = room.locked ? "Queue is locked" : `${room.members.filter((m) => m.connected).length} here`;
+    ui.nowTitle.textContent = "Queue a song to begin";
+    ui.nowSub.textContent = canWrite ? "Paste a YouTube link or search" : "Sign in to add songs";
   }
 
   ui.queue.replaceChildren();
-  if (!room.queue.length) {
+  const rest = started ? upNext() : items;
+  if (!rest.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = room.locked ? "Queue locked by host." : "Nothing queued. Search or paste a YouTube link.";
+    empty.textContent = "Nothing queued. Search or paste a YouTube link.";
     ui.queue.appendChild(empty);
   } else {
-    for (const t of room.queue) ui.queue.appendChild(trackEl(t));
+    for (const t of rest) ui.queue.appendChild(trackEl(t, started ? 1 : 0));
   }
 
-  const gone = !isHost && Date.now() - lastHostBeat > HOST_GONE_MS && lastHostBeat > 0;
-  const st = statusText || "";
-  if (st === "connecting" || st === "connecting…") setBanner("Connecting phones…", false);
-  else if (st === "reconnecting" || st === "disconnected") setBanner("Connection dropped — retrying…", true);
-  else if (st.startsWith("Could") || st.startsWith("bus error") || st.startsWith("no connack") || st.startsWith("socket")) {
-    setBanner("Could not reach the room bus. Retrying…", true);
-  } else if (gone) setBanner("Host left — they need to reopen the room on their phone.", true);
-  else if (isHost && document.visibilityState === "hidden") setBanner("This tab is in the background. iPhone will stop YouTube.", true);
-  else if (isHost) setBanner("Keep this tab open. This phone is the speaker.", false);
-  else setBanner("", false);
+  if (lastError) setBanner(lastError, true);
+  else if (isHost) setBanner("Keep this tab open. This phone is the speaker. Queue is a YouTube playlist.", false);
+  else setBanner(canWrite ? "" : "Sign in with Google to add. If add fails, ask the host to enable Collaborate on the playlist.", false);
 }
 
-function trackEl(t) {
-  const my = (t.votes && t.votes[memberId]) || 0;
+function trackEl(t, minPos) {
   const row = document.createElement("div");
   row.className = "q-item";
-
   const votes = document.createElement("div");
   votes.className = "votes";
   const up = document.createElement("button");
   up.textContent = "▲";
-  up.className = my === 1 ? "on-up" : "";
-  up.onclick = () => send({ type: "vote", trackId: t.id, value: 1 });
+  up.onclick = () => vote(t, -1, minPos);
   const sc = document.createElement("div");
   sc.className = "score";
-  sc.textContent = String(t.score);
+  sc.textContent = String((t.position || 0) + 1);
   const down = document.createElement("button");
   down.textContent = "▼";
-  down.className = my === -1 ? "on-down" : "";
-  down.onclick = () => send({ type: "vote", trackId: t.id, value: -1 });
+  down.onclick = () => vote(t, +1, minPos);
   votes.append(up, sc, down);
 
   const img = document.createElement("img");
@@ -255,22 +239,20 @@ function trackEl(t) {
   title.textContent = t.title;
   const sub = document.createElement("div");
   sub.className = "sub";
-  const who = t.addedBy && t.addedBy.name ? t.addedBy.name : "someone";
-  sub.textContent = [who, t.channelTitle, formatDuration(t.durationSec)].filter(Boolean).join(" · ");
+  sub.textContent = [t.channelTitle, t.addedBy].filter(Boolean).join(" · ");
   meta.append(title, sub);
 
   const x = document.createElement("button");
   x.className = "x";
   x.textContent = "✕";
-  x.title = "Remove";
-  x.onclick = () => send({ type: "remove", trackId: t.id });
+  x.onclick = () => removeItem(t);
 
   row.append(votes, img, meta, x);
   return row;
 }
 
-function showResults(items, error) {
-  ui.results.hidden = !error && (!items || !items.length);
+function showResults(list, error) {
+  ui.results.hidden = !error && (!list || !list.length);
   ui.results.replaceChildren();
   if (error) {
     const p = document.createElement("div");
@@ -281,11 +263,11 @@ function showResults(items, error) {
     ui.results.hidden = false;
     return;
   }
-  for (const it of items || []) {
+  for (const it of list || []) {
     const b = document.createElement("button");
     b.className = "res";
     const img = document.createElement("img");
-    img.src = it.thumbnail;
+    img.src = it.thumbnail || thumbnailUrl(it.videoId);
     img.alt = "";
     const meta = document.createElement("div");
     meta.className = "meta";
@@ -294,11 +276,11 @@ function showResults(items, error) {
     title.textContent = it.title;
     const sub = document.createElement("div");
     sub.className = "sub";
-    sub.textContent = [it.channelTitle, formatDuration(it.durationSec)].filter(Boolean).join(" · ");
+    sub.textContent = it.channelTitle || "";
     meta.append(title, sub);
     b.append(img, meta);
     b.onclick = () => {
-      addTrack(it);
+      addVideo(it.videoId);
       ui.results.hidden = true;
       ui.search.value = "";
     };
@@ -306,113 +288,93 @@ function showResults(items, error) {
   }
 }
 
-async function addTrack(meta) {
-  send({
-    type: "add",
-    videoId: meta.videoId,
-    title: meta.title,
-    thumbnail: meta.thumbnail,
-    channelTitle: meta.channelTitle,
-    durationSec: meta.durationSec,
-  });
-}
-
-async function addByVideoId(videoId) {
-  let meta = {
-    videoId,
-    title: "YouTube video",
-    thumbnail: thumbnailUrl(videoId),
-    channelTitle: "",
-    durationSec: null,
-  };
+async function refreshQueue() {
+  if (!playlistId || leaving) return;
+  const tok = getToken();
+  if (!tok) return;
   try {
-    meta = { ...meta, ...(await lookupOEmbed(videoId)) };
-  } catch {}
-  addTrack(meta);
-}
-
-async function handleSearch(q) {
-  const id = parseVideoId(q);
-  if (id) {
-    showResults([]);
-    await addByVideoId(id);
-    ui.search.value = "";
-    return;
-  }
-  if (isHost) {
-    const key = localStorage.getItem(LS_KEY);
-    if (!key) {
-      showResults(null, "Host has not enabled search. Paste a YouTube link, or add an API key in ⚙.");
+    const data = await listItems(tok, playlistId, etag);
+    lastError = "";
+    if (data.unchanged) return;
+    etag = data.etag;
+    items = data.items || [];
+    render();
+    syncPlayer();
+  } catch (e) {
+    if (e.status === 401) {
+      lastError = "Google sign-in expired — tap Sign in.";
+      render();
       return;
     }
-    try {
-      const items = await searchYoutube(q, key);
-      showResults(items, items.length ? "" : "No embeddable videos.");
-    } catch (e) {
-      const m = String(e.message || e);
-      showResults(null, m === "QUOTA" ? "YouTube search quota is used up for today. Paste links instead." : m);
-    }
-    return;
-  }
-  pendingSearch = generateId();
-  if (bus) bus.publish("action", { type: "search", from: memberId, q, requestId: pendingSearch });
-}
-
-async function hostSearchFor(obj) {
-  const key = localStorage.getItem(LS_KEY);
-  let payload = { requestId: obj.requestId, items: [], error: null };
-  if (!key) payload.error = "Host has not enabled search. Paste a YouTube link.";
-  else {
-    try {
-      payload.items = await searchYoutube(obj.q, key);
-      if (!payload.items.length) payload.error = "No embeddable videos.";
-    } catch (e) {
-      const m = String(e.message || e);
-      payload.error = m === "QUOTA" ? "YouTube search quota is used up for today. Paste links instead." : m;
-    }
-  }
-  bus.publish("search/" + obj.requestId, payload);
-}
-
-function announce() {
-  if (!bus) return;
-  const payload = { memberId, name: nickname(), role: isHost ? "host" : "guest", online: true };
-  bus.publish("hello", payload, true);
-  bus.publish("presence/" + memberId, payload, true);
-}
-
-function onBus(tail, obj) {
-  if (!obj) return;
-  if (tail === "state" && obj.room && obj.from === obj.room.hostId) {
-    room = obj.room;
-    lastHostBeat = Date.now();
-    statusText = "live";
+    lastError = e.message || "Could not read playlist";
     render();
-    return;
   }
-  if (tail === "host") {
-    if (obj.online) lastHostBeat = Date.now();
-    render();
-    return;
+}
+
+function startPoll() {
+  stopPoll();
+  pollTimer = setInterval(() => {
+    if (document.visibilityState === "hidden" && !isHost) return;
+    refreshQueue();
+  }, isHost ? 3000 : 5000);
+}
+
+function stopPoll() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = 0;
+}
+
+async function addVideo(videoId) {
+  try {
+    const tok = tokenOrThrow();
+    await insertVideo(tok, playlistId, videoId);
+    etag = null;
+    await refreshQueue();
+  } catch (e) {
+    if (e.status === 403 || e.reason === "forbidden" || /forbidden|insufficient/i.test(e.message || "")) {
+      toast("YouTube blocked the add. Owner/collaborator only — enable Collaborate on the playlist.");
+    } else if (e.status === 409 || /duplicate/i.test(e.message || "")) {
+      toast("Already in the playlist");
+    } else toast(e.message || "Add failed");
   }
-  if (tail === "hello" || tail === "bye" || tail.startsWith("presence/")) {
-    if (isHost && obj.memberId && obj.memberId !== memberId) {
-      localApply(obj.memberId, { type: obj.online === false || tail === "bye" ? "bye" : "hello", name: obj.name });
-    }
-    return;
+}
+
+async function vote(item, dir, minPos) {
+  try {
+    const tok = tokenOrThrow();
+    if (dir < 0) await bumpUp(tok, playlistId, item, minPos);
+    else await bumpDown(tok, playlistId, item);
+    etag = null;
+    await refreshQueue();
+  } catch (e) {
+    toast(e.message || "Could not move song");
   }
-  if (!isHost) {
-    if (tail.startsWith("search/") && obj.requestId === pendingSearch) {
-      showResults(obj.items, obj.error);
-    }
-    return;
+}
+
+async function removeItem(item) {
+  try {
+    const tok = tokenOrThrow();
+    await deleteItem(tok, item.playlistItemId);
+    etag = null;
+    await refreshQueue();
+  } catch (e) {
+    toast(e.message || "Could not remove");
   }
-  if (tail === "action" && obj.from && obj.from !== memberId) {
-    if (obj.type === "search") {
-      hostSearchFor(obj);
-      return;
-    }
-    localApply(obj.from, obj);
+}
+
+async function skip() {
+  const np = nowItem();
+  if (!np) return;
+  try {
+    const tok = tokenOrThrow();
+    await deleteItem(tok, np.playlistItemId);
+    actuallyPlaying = false;
+    lastLoaded = null;
+    etag = null;
+    await refreshQueue();
+    if (started) kickPlay();
+  } catch (e) {
+    toast(e.message || "Skip failed");
   }
 }
 
@@ -424,206 +386,202 @@ async function ensurePlayer() {
     await loadIframeApi();
     if (player) return;
     player = createHostPlayer("yt-player", {
-    onReady() {
-      syncPlayer();
-    },
-    onEnded() {
-      if (Date.now() < ignoreEndedUntil) return;
-      ignoreEndedUntil = Date.now() + 1200;
-      actuallyPlaying = false;
-      send({ type: "ended" });
-    },
-    onError() {
-      toast("This video can’t play in the embed — skipping");
-      ignoreEndedUntil = Date.now() + 1200;
-      actuallyPlaying = false;
-      send({ type: "error" });
-    },
-    onPlaying(data) {
-      actuallyPlaying = true;
-      ui.startOverlay.classList.add("gone");
-      if (data && data.title && room && room.nowPlaying && room.nowPlaying.videoId === data.video_id) {
-        if (room.nowPlaying.title === "YouTube video") {
-          send({ type: "retitle", videoId: data.video_id, title: data.title, channelTitle: data.author });
-        }
-      }
-      render();
-    },
-    onPaused() {
-      actuallyPlaying = false;
-      render();
-    },
+      onReady() {
+        syncPlayer();
+      },
+      onEnded() {
+        if (Date.now() < ignoreEndedUntil) return;
+        ignoreEndedUntil = Date.now() + 1200;
+        actuallyPlaying = false;
+        skip();
+      },
+      onError() {
+        toast("This video can’t play in the embed — skipping");
+        ignoreEndedUntil = Date.now() + 1200;
+        actuallyPlaying = false;
+        skip();
+      },
+      onPlaying() {
+        actuallyPlaying = true;
+        ui.startOverlay.classList.add("gone");
+        render();
+      },
+      onPaused() {
+        actuallyPlaying = false;
+        render();
+      },
     });
   })();
   return playerBoot;
 }
 
-function upcomingTrack() {
-  if (!room) return null;
-  return room.nowPlaying || room.queue[0] || null;
-}
-
 function syncPlayer() {
-  if (!isHost || !player || !room) return;
-  const np = upcomingTrack();
+  if (!isHost || !player) return;
+  const np = nowItem();
   if (!np) return;
-  const shouldPlay = started && !!room.nowPlaying && !room.paused;
+  const shouldPlay = started && !paused;
   if (np.videoId !== lastLoaded) {
     lastLoaded = np.videoId;
     ignoreEndedUntil = Date.now() + 1500;
     player.load(np.videoId, shouldPlay);
-  } else if (shouldPlay) {
-    player.play();
-  } else if (room.paused) {
-    player.pause();
-  }
+  } else if (shouldPlay) player.play();
+  else if (paused) player.pause();
 }
 
 function kickPlay() {
   started = true;
-  if (!room) return;
-  if (!room.nowPlaying && room.queue.length) send({ type: "start" });
-  else if (room.nowPlaying && room.paused) send({ type: "pause", paused: false });
-  else if (room.nowPlaying) syncPlayer();
-  else send({ type: "start" });
+  paused = false;
+  if (!nowItem()) {
+    toast("Queue a song first");
+    return;
+  }
+  syncPlayer();
   if (player) player.play();
   requestWake();
 }
 
-function scheduleReconnect(code) {
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(() => {
-    if (leaving || !room) return;
-    enterRoom(code, isHost, true);
-  }, 1500);
-}
-
-async function enterRoom(code, asHost, reconnect = false) {
-  code = normalizeCode(code);
-  if (!isValidCode(code)) {
-    toast("Bad room code");
+async function enterPlaylist(id, asHost) {
+  const pid = parsePlaylistId(id) || id;
+  if (!pid) {
+    toast("Need a YouTube playlist URL or ID");
     return;
   }
   leaving = false;
   localStorage.setItem(LS_NICK, nickname());
-  isHost = asHost;
-  if (!reconnect) {
-    started = false;
-    actuallyPlaying = false;
-    lastLoaded = null;
-    lastHostBeat = Date.now();
-    if (asHost && !room) room = createRoom(code, memberId, nickname());
-    if (!asHost) room = createRoom(code, "unknown", "Host");
-    showRoom();
-  }
-  location.hash = "#/r/" + code;
-  statusText = "connecting";
+  playlistId = pid;
+  isHost = asHost || ownedIds().includes(pid);
+  started = false;
+  paused = false;
+  actuallyPlaying = false;
+  lastLoaded = null;
+  items = [];
+  etag = null;
+  lastError = "";
+  location.hash = "#/p/" + pid;
+  showRoom();
   render();
-  if (asHost) ensurePlayer();
-  if (bus) {
-    bus.close();
-    bus = null;
+  if (isHost) ensurePlayer();
+
+  if (!signedIn()) {
+    lastError = "Sign in with Google to load this playlist.";
+    render();
+    try {
+      signIn();
+    } catch {}
+    return;
   }
+
   try {
-    bus = await connectRoom({
-      code,
-      memberId,
-      isHost,
-      onMessage: onBus,
-      onStatus(s) {
-        if (s === "disconnected" && !leaving) {
-          statusText = "reconnecting";
-          render();
-          scheduleReconnect(code);
-          return;
-        }
-        statusText = s === "connected" ? "live" : s;
-        render();
-      },
-    });
-    announce();
-    if (isHost) {
-      publishState();
-      await ensurePlayer();
-      if (!hostWatch) {
-        hostWatch = setInterval(() => {
-          if (isHost && bus) {
-            bus.publish("host", { memberId, online: true, ts: Date.now() }, true);
-            announce();
-          }
-          render();
-        }, 10000);
-      }
-    }
-    statusText = "live";
+    const tok = getToken();
+    const pl = await getPlaylist(tok, pid);
+    if (!pl) throw new Error("Playlist not found (sign in, and use an unlisted/public list)");
+    playlistOwner = pl.snippet && pl.snippet.channelId;
+    try {
+      myChannel = await myChannelId(tok);
+    } catch {}
+    isHost = ownedIds().includes(pid);
+    canWrite = isHost || (myChannel && playlistOwner && myChannel === playlistOwner);
+    await refreshQueue();
+    startPoll();
+    if (isHost) await ensurePlayer();
     render();
   } catch (e) {
-    statusText = "reconnecting";
+    lastError = e.message || "Could not open playlist";
     render();
-    toast(e.message || "connect failed");
-    scheduleReconnect(code);
+  }
+}
+
+async function createRoom() {
+  if (!clientId()) {
+    toast("Add a Google OAuth client ID in setup first");
+    return;
+  }
+  if (!signedIn()) {
+    signIn();
+    toast("Sign in, then tap Create again");
+    return;
+  }
+  const title = "NextUp " + (nickname() || "party") + " " + new Date().toISOString().slice(0, 16).replace("T", " ");
+  try {
+    const pl = await createPlaylist(getToken(), title);
+    const id = pl.id;
+    rememberOwned(id);
+    isHost = true;
+    canWrite = true;
+    await enterPlaylist(id, true);
+  } catch (e) {
+    toast(e.message || "Could not create playlist");
   }
 }
 
 function leave() {
   leaving = true;
-  clearTimeout(reconnectTimer);
-  if (hostWatch) {
-    clearInterval(hostWatch);
-    hostWatch = null;
-  }
-  if (bus) bus.close();
-  bus = null;
+  stopPoll();
   if (player) {
     player.destroy();
     player = null;
   }
   playerBoot = null;
   remountPlayer();
-  dropWake();
-  room = null;
+  playlistId = null;
+  items = [];
   isHost = false;
   started = false;
   actuallyPlaying = false;
   showHome();
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  renderHomeAuth();
 }
 
 function route() {
-  const m = /^#\/r\/([A-Za-z0-9]+)/.exec(location.hash || "");
+  const m = /^#\/p\/(PL[\w-]+)/i.exec(location.hash || "");
   if (!m) {
-    if (room) return;
+    if (playlistId) return;
     showHome();
+    renderHomeAuth();
     return;
   }
-  const code = normalizeCode(m[1]);
-  const hosts = loadHosts();
-  const asHost = hosts.includes(code);
-  if (room && room.code === code) return;
-  enterRoom(code, asHost);
+  if (playlistId && playlistId === m[1]) return;
+  enterPlaylist(m[1], ownedIds().includes(m[1]));
 }
 
-$("btn-create").onclick = () => {
-  if (!nickname()) {
-    toast("Pick a name first");
-    ui.nick.focus();
+function bootGoogle() {
+  const id = clientId();
+  if (!id) {
+    renderHomeAuth();
     return;
   }
-  const code = generateCode();
-  const hosts = loadHosts();
-  hosts.push(code);
-  saveHosts(hosts);
-  room = createRoom(code, memberId, nickname());
-  enterRoom(code, true);
-};
+  const ok = initGoogle(id, (yes, err) => {
+    toastAuth();
+    if (yes && playlistId) enterPlaylist(playlistId, isHost);
+    if (!yes && err) toast(String(err));
+    renderHomeAuth();
+  });
+  if (!ok) {
+    setTimeout(bootGoogle, 250);
+  }
+  renderHomeAuth();
+}
 
-$("btn-join").onclick = () => {
-  if (!nickname()) {
-    toast("Pick a name first");
-    ui.nick.focus();
+$("btn-create").onclick = () => createRoom();
+$("btn-join").onclick = () => enterPlaylist(ui.joinCode.value, false);
+$("btn-google").onclick = () => {
+  if (!clientId()) {
+    toast("Paste a Google client ID in setup first");
     return;
   }
-  enterRoom(ui.joinCode.value, false);
+  try {
+    signIn();
+  } catch (e) {
+    toast(e.message);
+  }
+};
+$("btn-save-setup").onclick = () => {
+  const v = (ui.clientIdInput && ui.clientIdInput.value.trim()) || "";
+  if (v) localStorage.setItem(LS_CID, v);
+  else localStorage.removeItem(LS_CID);
+  toast("Saved on this phone. For everyone, put it in js/config.js and deploy.");
+  bootGoogle();
 };
 
 ui.joinCode.addEventListener("keydown", (e) => {
@@ -631,19 +589,19 @@ ui.joinCode.addEventListener("keydown", (e) => {
 });
 
 $("btn-leave").onclick = leave;
-
-$("btn-start").onclick = () => {
-  kickPlay();
+$("btn-start").onclick = () => kickPlay();
+$("btn-skip").onclick = () => skip();
+$("btn-pause").onclick = () => {
+  paused = !paused;
+  if (paused && player) player.pause();
+  else kickPlay();
+  render();
 };
 
-$("btn-skip").onclick = () => send({ type: "skip" });
-$("btn-pause").onclick = () => send({ type: "pause", paused: !room.paused });
-$("btn-lock").onclick = () => send({ type: "lock", locked: !room.locked });
-
 $("btn-qr").onclick = () => {
-  if (!room) return;
-  const url = joinUrl(room.code);
-  ui.qrLabel.textContent = room.code;
+  if (!playlistId) return;
+  const url = joinUrl();
+  ui.qrLabel.textContent = shortCode(playlistId);
   ui.qrUrl.textContent = url;
   try {
     drawQr(ui.qrCanvas, url);
@@ -655,19 +613,30 @@ $("btn-qr").onclick = () => {
 $("btn-close-qr").onclick = () => ui.modalQr.classList.remove("on");
 $("btn-copy").onclick = async () => {
   try {
-    await navigator.clipboard.writeText(joinUrl(room.code));
+    await navigator.clipboard.writeText(joinUrl());
     toast("Link copied");
   } catch {
-    toast(joinUrl(room.code));
+    toast(joinUrl());
   }
 };
 
-$("btn-gear").onclick = () => ui.modalGear.classList.add("on");
+$("btn-gear").onclick = () => {
+  const link = $("playlist-link");
+  if (link && playlistId) {
+    link.href = playlistWatchUrl(playlistId);
+    link.textContent = "Open this playlist on YouTube";
+  }
+  if (ui.ytKey) ui.ytKey.value = localStorage.getItem(LS_CID) || "";
+  ui.modalGear.classList.add("on");
+};
 $("btn-close-gear").onclick = () => ui.modalGear.classList.remove("on");
 $("btn-save-key").onclick = () => {
-  localStorage.setItem(LS_KEY, ui.ytKey.value.trim());
-  toast("Key saved on this phone only");
+  const v = (ui.ytKey && ui.ytKey.value.trim()) || "";
+  if (v) localStorage.setItem(LS_CID, v);
+  else localStorage.removeItem(LS_CID);
+  toast("Client ID saved on this phone");
   ui.modalGear.classList.remove("on");
+  bootGoogle();
 };
 
 ui.search.addEventListener("input", () => {
@@ -686,10 +655,39 @@ ui.search.addEventListener("keydown", (e) => {
   }
 });
 
+async function handleSearch(q) {
+  const vid = parseVideoId(q);
+  if (vid) {
+    let meta = null;
+    try {
+      meta = await videoMeta(tokenOrThrow(), vid);
+    } catch {
+      try {
+        meta = await lookupOEmbed(vid);
+      } catch {}
+    }
+    await addVideo(vid);
+    ui.search.value = "";
+    ui.results.hidden = true;
+    return;
+  }
+  try {
+    const list = await searchVideos(tokenOrThrow(), q);
+    showResults(list, list.length ? "" : "No embeddable videos");
+  } catch (e) {
+    showResults(null, e.message || "Search failed");
+  }
+}
+
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && isHost && started) requestWake();
+  if (document.visibilityState === "visible" && playlistId) refreshQueue();
   render();
 });
 
 window.addEventListener("hashchange", route);
+window.addEventListener("load", () => {
+  bootGoogle();
+  route();
+});
+bootGoogle();
 route();

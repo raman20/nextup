@@ -1,52 +1,41 @@
 # NextUp
 
-A shared YouTube queue for the living room. One phone is the speaker. Everyone else searches, pastes links, and **votes** on what plays next.
+A shared YouTube **playlist** for the living room. One phone is the speaker. Everyone else adds and bumps tracks. The queue **is** a YouTube playlist; we poll it (etag) so phones stay in sync.
 
-No accounts. No npm. No server to run — only a static file host. Works across WiFi and cellular.
-
-## Use it
+No MQTT. No npm. Official YouTube IFrame on the host. Google account for writes.
 
 Live: **https://raman20.github.io/nextup/**
 
-Open that URL on the host phone. Create a room, keep the tab visible, tap **Start the party**. Friends open the same site (WiFi or LTE), type the code or scan the QR.
+## Setup (once)
 
-Local preview (YouTube blocks `file://` embeds):
+1. [Google Cloud Console](https://console.cloud.google.com/) → enable **YouTube Data API v3**.
+2. Credentials → **OAuth 2.0 Client ID** → type **Web application**.
+3. Authorized JavaScript origins:
+   - `https://raman20.github.io`
+   - `http://localhost:8080`
+4. Put the client ID in `js/config.js` (`GOOGLE_CLIENT_ID`) and deploy, **or** paste it in the home-screen setup box (that phone only).
 
-```bash
-cd nextup
-node serve.mjs
-```
+OAuth consent screen: add yourself as a test user while the app is in Testing.
 
-Then `http://localhost:8080`. GitHub Pages is the origin you want for a real hangout.
+## Party
 
-## How it works
+1. Host: Sign in with Google → **Create playlist room**. Keep that tab open.
+2. Share the QR / link (`#/p/PLxxxx`).
+3. On YouTube, open the playlist → **Collaborate** → allow adds → send friends the invite once (YouTube only lets the **owner or collaborators** call `playlistItems.insert`).
+4. Friends: Sign in with Google → paste links or search → ▲ / ▼ to move songs.
+5. Host taps **Start the party**.
 
-- **Host device** loads the official YouTube IFrame player. That is the only speaker.
-- **Queue + votes** sync over a public MQTT WebSocket broker (HiveMQ, Mosquitto fallback). We do not operate that broker. App data is a JSON snapshot on `nextup/{code}/…`.
-- **Search** (optional): host pastes a YouTube Data API v3 key in ⚙. The key stays in that phone’s `localStorage`. Guests send queries to the host; the host calls Google. Default quota is tight (~100 searches/day), so results are cached. **Paste a YouTube URL always works**, with no key.
+Local preview: `node serve.mjs` → `http://localhost:8080`.
 
-## YouTube rules we follow
+## How refresh works
 
-Official IFrame only. The player stays visible (≥ 200×200), ads and YouTube chrome stay, no audio extraction. By using NextUp you also agree to [YouTube’s Terms of Service](https://www.youtube.com/t/terms).
-
-The host phone must keep the tab in the foreground. iOS will stop playback if you switch apps — that is Safari + YouTube, not NextUp.
-
-## API key (optional)
-
-1. Google Cloud → enable **YouTube Data API v3** → create an API key.
-2. Restrict it to HTTP referers for this origin (`https://raman20.github.io/*`).
-3. Host: ⚙ → paste key → Save.
-
-## Swap the message bus
-
-Public brokers have no SLA. NextUp tries EMQX, then HiveMQ, then Mosquitto. Edit `BROKERS` at the top of `js/net.js` to point at your own.
-
-## Tests
-
-`http://localhost:8080/test.html`
+YouTube playlists do not push. NextUp polls `playlistItems.list` every few seconds (If-None-Match / etag). New adds, skips, and bumps show up on every signed-in phone. The host player follows item **#1** as now playing; skip **deletes** that playlist item and plays the next.
 
 ## Limits
 
-- Anyone who knows the room code can join and vote.
-- Symmetric NAT is irrelevant here (no WebRTC). You need internet for YouTube and the broker.
-- This is a hangout tool, not a product with uptime.
+- Collaborators are a YouTube product feature, not a Data API invite. If add returns 403, enable Collaborate on the playlist.
+- Search uses the same Cloud project quota (`search.list` is expensive). Paste-a-link is cheap.
+- Host tab must stay in the foreground (Safari/iOS will stop the embed).
+- Playlist is unlisted, not a bank vault.
+
+[YouTube Terms of Service](https://www.youtube.com/t/terms)

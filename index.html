@@ -15,6 +15,7 @@
     })();
   </script>
   <link rel="stylesheet" href="styles.css" />
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <div class="app">
@@ -22,7 +23,18 @@
       <div class="mark">
         <b>NEXTUP</b>
         <h1>One phone.<br>Everyone queues.</h1>
-        <p>Host plays YouTube. Friends search, paste links, and vote on what is next — from any network.</p>
+        <p>The queue <em>is</em> a YouTube playlist. We poll it so every phone stays in sync. Host plays; friends add and bump tracks.</p>
+      </div>
+      <div class="panel" id="setup-panel" hidden>
+        <h2>One-time Google setup</h2>
+        <p class="hint">Create an OAuth <strong>Web</strong> client ID in Google Cloud (enable YouTube Data API v3). Add this site under Authorized JavaScript origins. Paste the client ID here for this phone, or put it in <code>js/config.js</code> so everyone gets it.</p>
+        <input id="google-client-id" type="text" placeholder="….apps.googleusercontent.com" autocomplete="off" />
+        <button class="btn ghost" id="btn-save-setup">Save client ID</button>
+      </div>
+      <div class="panel">
+        <h2>Google account</h2>
+        <p class="hint" id="auth-status">Not signed in</p>
+        <button class="btn" id="btn-google">Sign in with Google</button>
       </div>
       <div class="panel">
         <h2>Your name</h2>
@@ -30,17 +42,19 @@
       </div>
       <div class="panel">
         <h2>Host a room</h2>
-        <p class="hint">This phone is the speaker. Keep the tab open.</p>
-        <button class="btn" id="btn-create">Create room</button>
+        <p class="hint">Creates an unlisted YouTube playlist. This phone is the speaker.</p>
+        <button class="btn" id="btn-create">Create playlist room</button>
       </div>
       <div class="panel">
-        <h2>Join a room</h2>
-        <input id="join-code" type="text" maxlength="8" placeholder="Room code" autocapitalize="characters" autocomplete="off" />
+        <h2>Join</h2>
+        <input id="join-code" type="text" placeholder="Playlist URL or ID (PLxxx)" autocomplete="off" />
         <button class="btn ghost" id="btn-join">Join</button>
       </div>
       <p class="foot">
-        Uses a public message bus only to sync the queue. Playback is the official
-        <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube</a> player on the host device.
+        Queue lives on YouTube. Playback is the official
+        <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube</a> embed on the host device.
+        Friends who should add songs need to be the owner or a
+        <a href="https://support.google.com/youtubemusic/answer/12574927" target="_blank" rel="noopener">playlist collaborator</a>.
       </p>
     </section>
 
@@ -53,8 +67,8 @@
         </div>
         <div class="grow"></div>
         <button class="icon-btn" id="btn-qr" title="QR">QR</button>
-        <button class="icon-btn host-only" id="btn-lock" title="Lock queue" hidden>#</button>
-        <button class="icon-btn host-only" id="btn-gear" title="Settings" hidden>⚙</button>
+        <button class="icon-btn host-only" id="btn-lock" title="Lock queue" hidden></button>
+        <button class="icon-btn" id="btn-gear" title="Settings">⚙</button>
       </header>
 
       <div id="banner" class="banner"></div>
@@ -107,11 +121,12 @@
 
   <div id="modal-gear" class="modal">
     <div class="sheet" style="align-items:stretch">
-      <h2>Host settings</h2>
-      <p class="hint">Optional YouTube Data API key, stored only on this phone. Restrict it to this site’s HTTP referer in Google Cloud. Paste-a-link works without a key.</p>
-      <label>API key</label>
-      <input id="yt-key" type="password" placeholder="AIza…" autocomplete="off" />
-      <button class="btn" id="btn-save-key">Save key</button>
+      <h2>Playlist</h2>
+      <p class="hint">The room is this YouTube playlist. Enable <strong>Collaborate</strong> on it so friends can add with their Google accounts. Then they open the invite once.</p>
+      <a id="playlist-link" href="#" target="_blank" rel="noopener">Open playlist on YouTube</a>
+      <label>Google OAuth client ID</label>
+      <input id="yt-key" type="text" placeholder="….apps.googleusercontent.com" autocomplete="off" />
+      <button class="btn" id="btn-save-key">Save client ID</button>
       <button class="btn ghost" id="btn-close-gear">Close</button>
     </div>
   </div>

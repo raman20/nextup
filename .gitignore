@@ -3,5 +3,8 @@ Thumbs.db
 qr-test.png
 .chrome-host/
 .chrome-guest/
+.chrome-host2/
+.chrome-guest2/
+.chrome-p5-*/
 _cdp-test.mjs
 _shots/
